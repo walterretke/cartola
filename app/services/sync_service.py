@@ -30,6 +30,7 @@ class SyncService:
         """
         Sincroniza partidas num intervalo de datas.
         Para cada partida finalizada, busca os stats de cada jogador.
+        Também atualiza Fixtures e TeamProfiles.
         """
         logger.info(f"Sincronizando partidas de {from_date} a {to_date}...")
 
@@ -39,15 +40,16 @@ class SyncService:
             logger.error(f"Falha ao buscar fixtures: {e}")
             raise e
 
-        # Filtrar apenas partidas finalizadas (status FT, AET, PEN)
-        finished = [f for f in fixtures if f.get("fixture", {}).get("status", {}).get("short") in ("FT", "AET", "PEN")]
-        logger.info(f"Total de partidas encontradas: {len(fixtures)}, finalizadas: {len(finished)}")
+        # Importando os novos modelos
+        from app.models.fixture import Fixture
+        from app.models.team_profile import TeamProfile
 
         synced_players = 0
         synced_stats = 0
         skipped_fixtures = 0
+        synced_fixtures = 0
 
-        for f_data in finished:
+        for f_data in fixtures:
             fixture_info = f_data.get("fixture", {})
             league_info = f_data.get("league", {})
             teams_info = f_data.get("teams", {})
@@ -57,13 +59,8 @@ class SyncService:
             if not fixture_id:
                 continue
 
-            # Verificar se já processamos esta partida
-            existing = self.db.query(PlayerMatchStats).filter(
-                PlayerMatchStats.fixture_id == fixture_id
-            ).first()
-            if existing:
-                skipped_fixtures += 1
-                continue
+            status_short = fixture_info.get("status", {}).get("short")
+            is_finished = status_short in ("FT", "AET", "PEN")
 
             match_date_str = fixture_info.get("date")
             match_date = None
@@ -82,9 +79,54 @@ class SyncService:
             away_team_id = teams_info.get("away", {}).get("id")
             away_team_name = teams_info.get("away", {}).get("name")
 
-            # Placar (para calcular SG e GS)
-            home_goals_scored = goals_info.get("home") or 0
-            away_goals_scored = goals_info.get("away") or 0
+            home_goals_scored = goals_info.get("home") if is_finished else None
+            away_goals_scored = goals_info.get("away") if is_finished else None
+
+            # ==== Upsert Team Profiles ====
+            for t_id, t_name in [(home_team_id, home_team_name), (away_team_id, away_team_name)]:
+                if t_id:
+                    team = self.db.query(TeamProfile).filter(TeamProfile.id == t_id).first()
+                    if not team:
+                        team = TeamProfile(id=t_id, name=t_name)
+                        self.db.add(team)
+                    else:
+                        team.name = t_name # update name if changed
+            self.db.flush()
+
+            # ==== Upsert Fixture ====
+            fixture_obj = self.db.query(Fixture).filter(Fixture.id == fixture_id).first()
+            if not fixture_obj:
+                fixture_obj = Fixture(
+                    id=fixture_id,
+                    round_name=round_name,
+                    match_date=match_date,
+                    status=status_short,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                    home_goals=home_goals_scored,
+                    away_goals=away_goals_scored
+                )
+                self.db.add(fixture_obj)
+                synced_fixtures += 1
+            else:
+                fixture_obj.status = status_short
+                fixture_obj.home_goals = home_goals_scored
+                fixture_obj.away_goals = away_goals_scored
+                fixture_obj.match_date = match_date
+
+            self.db.flush()
+
+            # ==== Se não acabou, pula stats dos jogadores ====
+            if not is_finished:
+                continue
+
+            # Verificar se já processamos stats desta partida
+            existing = self.db.query(PlayerMatchStats).filter(
+                PlayerMatchStats.fixture_id == fixture_id
+            ).first()
+            if existing:
+                skipped_fixtures += 1
+                continue
 
             # Buscar stats granulares dos jogadores para esta partida
             try:
@@ -268,19 +310,64 @@ class SyncService:
 
         self.db.commit()
 
-        # Calcular pontuação Cartola e Smart Score de todos os jogadores
+        # Recalcular perfis de times e pontuação Cartola de todos os jogadores
+        self._recalculate_team_profiles()
         recalculated = self.scoring_engine.calculate_all_scores()
 
         return {
             "status": "success",
             "message": "Sincronização completa com api-sports.io.",
             "fixtures_found": len(fixtures),
-            "fixtures_finished": len(finished),
-            "fixtures_skipped": skipped_fixtures,
+            "fixtures_synced": synced_fixtures,
+            "fixtures_stats_skipped": skipped_fixtures,
             "new_players": synced_players,
             "new_match_stats": synced_stats,
             "scores_calculated": recalculated,
         }
+
+    def _recalculate_team_profiles(self):
+        """
+        Calcula todos os stats de equipe (gols pró/contra, médias) 
+        varrendo os Fixtures armazenados no DB.
+        """
+        from app.models.fixture import Fixture
+        from app.models.team_profile import TeamProfile
+
+        teams = self.db.query(TeamProfile).all()
+        
+        for team in teams:
+            home_fixtures = self.db.query(Fixture).filter(Fixture.home_team_id == team.id, Fixture.status.in_(["FT", "AET", "PEN"])).all()
+            away_fixtures = self.db.query(Fixture).filter(Fixture.away_team_id == team.id, Fixture.status.in_(["FT", "AET", "PEN"])).all()
+            
+            # Zerar
+            team.matches_played = len(home_fixtures) + len(away_fixtures)
+            team.home_matches = len(home_fixtures)
+            team.away_matches = len(away_fixtures)
+            
+            team.goals_scored_home = sum(f.home_goals or 0 for f in home_fixtures)
+            team.goals_scored_away = sum(f.away_goals or 0 for f in away_fixtures)
+            team.goals_scored = team.goals_scored_home + team.goals_scored_away
+            
+            team.goals_conceded_home = sum(f.away_goals or 0 for f in home_fixtures)
+            team.goals_conceded_away = sum(f.home_goals or 0 for f in away_fixtures)
+            team.goals_conceded = team.goals_conceded_home + team.goals_conceded_away
+            
+            home_clean_sheets = sum(1 for f in home_fixtures if (f.away_goals or 0) == 0)
+            away_clean_sheets = sum(1 for f in away_fixtures if (f.home_goals or 0) == 0)
+            team.clean_sheets = home_clean_sheets + away_clean_sheets
+            
+            # Médias
+            team.avg_goals_scored = (team.goals_scored / team.matches_played) if team.matches_played else 0.0
+            team.avg_goals_scored_home = (team.goals_scored_home / team.home_matches) if team.home_matches else 0.0
+            team.avg_goals_scored_away = (team.goals_scored_away / team.away_matches) if team.away_matches else 0.0
+            
+            team.avg_goals_conceded = (team.goals_conceded / team.matches_played) if team.matches_played else 0.0
+            team.avg_goals_conceded_home = (team.goals_conceded_home / team.home_matches) if team.home_matches else 0.0
+            team.avg_goals_conceded_away = (team.goals_conceded_away / team.away_matches) if team.away_matches else 0.0
+            
+            team.clean_sheet_rate = (team.clean_sheets / team.matches_played * 100) if team.matches_played else 0.0
+
+        self.db.commit()
 
     async def sync_season(
         self,

@@ -1,13 +1,16 @@
-from app.db.base_class import Base
-from app.models.scout_action import ScoutAction
 from app.models.player import Player
 from app.models.player_match_stats import PlayerMatchStats
 from app.models.player_score import PlayerScore
+from app.models.scout_action import ScoutAction
+from app.models.team_profile import TeamProfile
+from app.models.fixture import Fixture
 
+# Make them available at the package level
 __all__ = [
-    "Base",
-    "ScoutAction",
     "Player",
     "PlayerMatchStats",
     "PlayerScore",
+    "ScoutAction",
+    "TeamProfile",
+    "Fixture"
 ]
