@@ -212,10 +212,38 @@ class ScoringEngine:
 
         n = len(scores)
         total_pts = sum(scores)
-        avg_pts = total_pts / n
+        current_avg_pts = (total_pts / n) if n > 0 else 0.0
 
-        avg_home = (sum(home_scores) / len(home_scores)) if home_scores else avg_pts
-        avg_away = (sum(away_scores) / len(away_scores)) if away_scores else avg_pts
+        avg_home = (sum(home_scores) / len(home_scores)) if home_scores else current_avg_pts
+        avg_away = (sum(away_scores) / len(away_scores)) if away_scores else current_avg_pts
+
+        # ========== PRIORI BAYESIANA (Usando Histórico da Temporada Passada e LDC) ==========
+        from app.models.player_season_history import PlayerSeasonHistory
+        from datetime import datetime
+        current_year = datetime.now().year
+        
+        # Buscar histórico do ano passado (ou o mais recente disponível)
+        historical_profile = self.db.query(PlayerSeasonHistory).filter(
+            PlayerSeasonHistory.player_id == player.id,
+            PlayerSeasonHistory.season_year < current_year
+        ).order_by(PlayerSeasonHistory.season_year.desc()).first()
+
+        # A "Regra Viveros" (Decaimento Rápido para LDC < 1.0)
+        # Se veio da Série B, a paciência da IA dura só 3 jogos. Se veio da Série A, dura 6.
+        if historical_profile:
+            ldc = historical_profile.league_difficulty_weight
+            historical_pts = historical_profile.avg_points * ldc
+            patience_matches = 3 if ldc < 1.0 else 6
+            prior_weight = max(0, patience_matches - n)
+        else:
+            historical_pts = 0.0
+            prior_weight = 0
+        
+        if prior_weight > 0 and historical_profile:
+            # Fórmula de Bayes: Mescla a pontuação real atual com o peso do histórico penalizado
+            avg_pts = ((current_avg_pts * n) + (historical_pts * prior_weight)) / (n + prior_weight)
+        else:
+            avg_pts = current_avg_pts
 
         # ========== FASE 2: Oscilação e Consistência ==========
         if n > 1:
@@ -230,11 +258,27 @@ class ScoringEngine:
             ratio = std_dev / (abs(avg_pts) + 1.0)
             consistency = max(0.0, min(100.0, round(100.0 - (ratio * 35.0), 1)))
 
-        # ========== FASE 3: Momentum (últimos 3 e 5 jogos) ==========
+        # ========== FASE 3: Momentum e EMA (Exponential Moving Average) ==========
         last_3 = scores[-3:] if len(scores) >= 3 else scores
         last_5 = scores[-5:] if len(scores) >= 5 else scores
-        last_3_avg = sum(last_3) / len(last_3)
-        last_5_avg = sum(last_5) / len(last_5)
+        last_3_avg = sum(last_3) / len(last_3) if last_3 else 0.0
+        last_5_avg = sum(last_5) / len(last_5) if last_5 else 0.0
+
+        # Calcular Média Móvel Exponencial (EMA)
+        # alpha = 0.35 (Peso do jogo atual é 35%, peso do histórico é 65%)
+        alpha = 0.35
+        
+        # O EMA começa sendo o histórico penalizado do ano passado ou o primeiro jogo do ano atual.
+        if historical_profile and historical_profile.avg_points != 0:
+            ema = historical_profile.avg_points * historical_profile.league_difficulty_weight
+        else:
+            ema = scores[0] if scores else 0.0
+            
+        for i, s in enumerate(scores):
+            if i == 0 and not historical_profile:
+                # Já inicializado
+                continue
+            ema = (s * alpha) + (ema * (1 - alpha))
 
         # Tendência: comparar últimos 5 com média geral
         if n >= 5:
@@ -359,6 +403,7 @@ class ScoringEngine:
         player_score.max_score = round(max(scores), 2)
         player_score.last_3_avg = round(last_3_avg, 2)
         player_score.last_5_avg = round(last_5_avg, 2)
+        player_score.ema_points = round(ema, 2)
         player_score.trend = trend
 
         # Médias por scout
@@ -408,6 +453,7 @@ class ScoringEngine:
         ps.max_score = 0.0
         ps.last_3_avg = 0.0
         ps.last_5_avg = 0.0
+        ps.ema_points = 0.0
         ps.trend = "stable"
         ps.avg_goals = 0.0
         ps.avg_assists = 0.0

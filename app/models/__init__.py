@@ -4,6 +4,7 @@ from app.models.player_score import PlayerScore
 from app.models.scout_action import ScoutAction
 from app.models.team_profile import TeamProfile
 from app.models.fixture import Fixture
+from app.models.player_season_history import PlayerSeasonHistory
 
 # Make them available at the package level
 __all__ = [
@@ -12,5 +13,6 @@ __all__ = [
     "PlayerScore",
     "ScoutAction",
     "TeamProfile",
-    "Fixture"
+    "Fixture",
+    "PlayerSeasonHistory"
 ]

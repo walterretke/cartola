@@ -35,6 +35,7 @@ class PlayerScore(Base):
     # ========== MOMENTUM ==========
     last_3_avg = Column(Float, default=0.0)
     last_5_avg = Column(Float, default=0.0)
+    ema_points = Column(Float, default=0.0)             # Média Móvel Exponencial (EMA)
     trend = Column(String(20), default="stable")        # rising, falling, stable
     
     # ========== MÉDIAS POR SCOUT (por jogo) ==========

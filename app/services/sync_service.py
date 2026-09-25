@@ -407,3 +407,56 @@ class SyncService:
             current = chunk_end + timedelta(days=1)
 
         return total_result
+
+    async def sync_cartola_status(self) -> Dict[str, Any]:
+        """
+        Bate na API oficial do Cartola para sincronizar o status de todos os jogadores
+        (Provável, Dúvida, Suspenso, etc).
+        Isso nos blinda contra escalar jogador poupado.
+        """
+        import httpx
+        from sqlalchemy import func
+        url = "https://api.cartola.globo.com/atletas/mercado"
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                data = response.json()
+        except Exception as e:
+            logger.error(f"Erro ao buscar status do Cartola: {e}")
+            return {"status": "error", "message": str(e)}
+
+        atletas = data.get("atletas", [])
+        synced = 0
+        
+        # Mapeamento grosseiro por nome para prova de conceito. 
+        # O ideal é usar fuzzy matching ou cruzar com IDs mapeados manualmente.
+        # Aqui, vamos ignorar acentos e transformar em minúsculo para bater o apelido/nome.
+        import unicodedata
+        def normalize_str(s):
+            if not s: return ""
+            return "".join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn').lower()
+
+        # Buscar todos os jogadores do banco
+        db_players = self.db.query(Player).all()
+        players_map = {normalize_str(p.name): p for p in db_players}
+        
+        for atleta in atletas:
+            apelido = normalize_str(atleta.get("apelido", ""))
+            status_id = atleta.get("status_id", 6)
+            preco = atleta.get("preco_num", 0.0)
+            
+            # Tenta casar o nome
+            db_player = players_map.get(apelido)
+            if db_player:
+                db_player.cartola_status_id = status_id
+                db_player.price_cartoletas = preco
+                synced += 1
+
+        self.db.commit()
+        return {
+            "status": "success",
+            "message": "Status sincronizado via Cartola API",
+            "players_updated": synced
+        }

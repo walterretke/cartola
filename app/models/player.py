@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime
+from sqlalchemy import Column, Integer, String, DateTime, Float
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.db.base_class import Base
@@ -21,8 +21,15 @@ class Player(Base):
     age = Column(Integer, nullable=True)
     nationality = Column(String(100), nullable=True)
     
+    # Status oficial do Cartola (7=Provável, 2=Dúvida, etc)
+    cartola_status_id = Column(Integer, default=6)
+    
+    # Preço oficial no mercado (Cartoletas)
+    price_cartoletas = Column(Float, default=0.0)
+    
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     match_stats = relationship("PlayerMatchStats", back_populates="player", cascade="all, delete-orphan")
     score = relationship("PlayerScore", back_populates="player", uselist=False, cascade="all, delete-orphan")
+    history_records = relationship("PlayerSeasonHistory", back_populates="player", cascade="all, delete-orphan")

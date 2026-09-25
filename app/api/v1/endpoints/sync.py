@@ -52,3 +52,12 @@ def recalculate_scores(db: Session = Depends(get_db)):
         "status": "success",
         "message": f"Scores recalculados para {count} jogadores.",
     }
+
+@router.post("/cartola-status")
+async def sync_cartola_status(db: Session = Depends(get_db)):
+    """
+    Bate na API oficial do Cartola para sincronizar status (Provável, Dúvida, etc).
+    """
+    sync_service = SyncService(db=db)
+    result = await sync_service.sync_cartola_status()
+    return result

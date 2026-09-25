@@ -61,8 +61,8 @@ class RecommendationEngine:
             base_score = (base_score * weight) + (ps.avg_points * (1 - weight))
             reasoning.append("Amostragem de mando baixa, mesclando com média geral.")
 
-        # 2. Ponderação com Momentum (Fator 7)
-        weighted_base = (base_score * 0.45) + (ps.last_3_avg * 0.35) + (ps.last_5_avg * 0.20)
+        # 2. Ponderação com Momentum (Fator 7 - Agora usando Média Móvel Exponencial)
+        weighted_base = ps.ema_points
         
         if ps.trend == "rising":
             momentum_mod = 1.06
