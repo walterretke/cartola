@@ -1,13 +1,24 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
-    PROJECT_NAME: str = "Mobile API"
+    PROJECT_NAME: str = "CartolaAI Backend"
     API_V1_STR: str = "/api/v1"
     
-    # Adicionar outras configuracoes, como URL de banco de dados, JWT secrets, etc.
-    # DATABASE_URI: str = "sqlite:///./test.db"
+    # Banco de Dados
+    DATABASE_URL: str = "sqlite:///./cartola.db"
+    
+    # API-Football
+    API_FOOTBALL_KEY: str = ""
+    API_FOOTBALL_BASE_URL: str = "https://v3.football.api-sports.io"
+    
+    # Brasileirão
+    BRASILEIRAO_LEAGUE_ID: int = 71
+    BRASILEIRAO_SEASON: int = 2024
 
-    class Config:
-        case_sensitive = True
+    model_config = SettingsConfigDict(
+        env_file=(".env.local", ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore"
+    )
 
 settings = Settings()
