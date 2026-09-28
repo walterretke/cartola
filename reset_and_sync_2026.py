@@ -22,12 +22,11 @@ async def main():
     Base.metadata.create_all(bind=engine)
 
     # 2. Inicializar Master Data (Scouts)
-    # Aqui voce pode importar sua funcao init_db() se quiser
-    from app.db.seed import seed_scouts
-    db = SessionLocal()
-    seed_scouts(db)
+    from app.db.seed import init_db
+    init_db()
     
     # 3. Executar o SyncService para o periodo desejado
+    db = SessionLocal()
     sync_service = SyncService(db=db)
     
     # Monkey-patch temporario no cliente da API para garantir o limite de burst se o SyncService nao tiver
@@ -42,8 +41,8 @@ async def main():
     try:
         # ATENCAO: Ajuste a data final para a data atual da sua execucao
         result = await sync_service.sync_fixtures_by_range(
-            from_date="2026-04-10", 
-            to_date="2026-10-01"
+            from_date="2026-01-01", 
+            to_date="2026-12-31"
         )
         logger.info(f"Sync Finalizado! Resultados: {result}")
     except Exception as e:
