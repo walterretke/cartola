@@ -7,3 +7,5 @@ api_router.include_router(scout_actions.router, prefix="/scout-actions", tags=["
 api_router.include_router(players.router, prefix="/players", tags=["Jogadores e Scores"])
 api_router.include_router(sync.router, prefix="/sync", tags=["Sincronização"])
 api_router.include_router(recommendations.router, prefix="/recommendations", tags=["Recomendações e Motor Contextual"])
+from app.api.v1.endpoints import teams
+api_router.include_router(teams.router, prefix='/teams', tags=['Estrategias e Escalacoes'])

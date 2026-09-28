@@ -11,6 +11,7 @@ class Player(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     api_football_id = Column(Integer, unique=True, index=True, nullable=False)
+    cartola_id = Column(Integer, unique=True, index=True, nullable=True)
     name = Column(String(150), nullable=False, index=True)
     firstname = Column(String(100), nullable=True)
     lastname = Column(String(100), nullable=True)

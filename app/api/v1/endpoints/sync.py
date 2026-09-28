@@ -61,3 +61,14 @@ async def sync_cartola_status(db: Session = Depends(get_db)):
     sync_service = SyncService(db=db)
     result = await sync_service.sync_cartola_status()
     return result
+
+@router.post("/match-cartola-ids")
+def match_cartola_ids(db: Session = Depends(get_db)):
+    """
+    Roda a inteligência de 'Fuzzy String Matching' para mapear os 
+    IDs do Cartola FC com os IDs dos jogadores já existentes da API-Football.
+    """
+    from app.services.player_matcher_service import PlayerMatcherService
+    matcher = PlayerMatcherService(db)
+    result = matcher.run_matching_pipeline()
+    return result

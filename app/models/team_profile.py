@@ -10,6 +10,7 @@ class TeamProfile(Base):
     __tablename__ = "cartola_team_profiles"
 
     id = Column(Integer, primary_key=True, index=True) # ID da API-Football
+    cartola_id = Column(Integer, unique=True, index=True, nullable=True)
     name = Column(String(150), nullable=False, index=True)
     
     # Amostragem
