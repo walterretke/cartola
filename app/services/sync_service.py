@@ -442,16 +442,28 @@ class SyncService:
         db_players = self.db.query(Player).all()
         players_map = {normalize_str(p.name): p for p in db_players}
         
+        posicoes_map = {
+            1: "Goleiro",
+            2: "Lateral",
+            3: "Zagueiro",
+            4: "Meia",
+            5: "Atacante",
+            6: "Tecnico"
+        }
+
         for atleta in atletas:
             apelido = normalize_str(atleta.get("apelido", ""))
             status_id = atleta.get("status_id", 6)
             preco = atleta.get("preco_num", 0.0)
+            posicao_id = atleta.get("posicao_id")
             
             # Tenta casar o nome
             db_player = players_map.get(apelido)
             if db_player:
                 db_player.cartola_status_id = status_id
                 db_player.price_cartoletas = preco
+                if posicao_id in posicoes_map:
+                    db_player.position = posicoes_map[posicao_id]
                 synced += 1
 
         self.db.commit()
