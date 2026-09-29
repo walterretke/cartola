@@ -49,6 +49,7 @@ class PlayerMatcherService:
         matched_count = 0
         unmatched = []
 
+        all_db_players = self.db.query(Player).all()
         # Para todos os jogadores listados no Cartola
         for c_player in cartola_players:
             cartola_id = c_player.get("atleta_id")
@@ -62,43 +63,43 @@ class PlayerMatcherService:
             if not api_team_id:
                 continue
 
-            # Busca todos os jogadores na base que so deste time
-            db_players = self.db.query(Player).filter(Player.team_id == api_team_id).all()
+            # Substituido: Busca todos os jogadores globalmente no inicio
+            pass
+            # a query global
             
             best_match = None
             best_score = 0
 
-            # Procura o melhor match no nosso DB
-            for db_p in db_players:
-                # Jǭ tǭ vinculado?
+            # 1. Tenta achar se o jogador ja foi vinculado antes (mesmo que tenha mudado de time)
+            for db_p in all_db_players:
                 if db_p.cartola_id == cartola_id:
                     best_match = db_p
                     best_score = 100
                     break
-                
-                # Compara Apelido vs Nome da API (Excelente para Rochet vs Sergio Rochet)
-                score1 = fuzz.token_set_ratio(c_nickname.lower(), db_p.name.lower())
-                
-                # Compara Nome Completo Cartola vs Nome API
-                score2 = fuzz.token_set_ratio(c_fullname.lower(), db_p.name.lower())
-                
-                # Se tivermos firstname/lastname, testa tambǸm
-                api_full = f"{db_p.firstname or ''} {db_p.lastname or ''}".strip().lower()
-                score3 = fuzz.token_set_ratio(c_fullname.lower(), api_full) if api_full else 0
-                
-                max_score = max(score1, score2, score3)
-                
-                if max_score > best_score:
-                    best_score = max_score
-                    best_match = db_p
-
+            
+            # 2. Se nao achou pelo ID, tenta pelo nome MAS SO ENTRE JOGADORES DO MESMO TIME
+            if not best_match:
+                db_players = [p for p in all_db_players if p.team_id == api_team_id]
+                for db_p in db_players:
+                    score1 = fuzz.token_set_ratio(c_nickname.lower(), db_p.name.lower())
+                    score2 = fuzz.token_set_ratio(c_fullname.lower(), db_p.name.lower())
+                    api_full = f"{db_p.firstname or ''} {db_p.lastname or ''}".strip().lower()
+                    score3 = fuzz.token_set_ratio(c_fullname.lower(), api_full) if api_full else 0
+                    max_score = max(score1, score2, score3)
+                    if max_score > best_score:
+                        best_score = max_score
+                        best_match = db_p
             # Se encontrou alguǸm com boa similaridade
             if best_match and best_score >= 80:
                 # Vincula!
+                posicoes_map = {1: "Goleiro", 2: "Lateral", 3: "Zagueiro", 4: "Meia", 5: "Atacante", 6: "Tecnico"}
                 best_match.cartola_id = cartola_id
                 # Aproveitamos para atualizar o preo e o status!
                 best_match.price_cartoletas = c_player.get("preco_num", 0.0)
                 best_match.cartola_status_id = c_player.get("status_id", 6)
+                pos_id = c_player.get("posicao_id")
+                if pos_id in posicoes_map:
+                    best_match.position = posicoes_map[pos_id]
                 matched_count += 1
             else:
                 unmatched.append({

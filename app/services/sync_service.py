@@ -253,9 +253,10 @@ class SyncService:
                         synced_players += 1
                     else:
                         # Atualizar time e posição (jogador pode ter sido transferido)
-                        player.team_id = current_team_id
-                        player.team_name = current_team_name
-                        player.position = position
+                        if not player.cartola_id:
+                            player.team_id = current_team_id
+                            player.team_name = current_team_name
+                            player.position = position
                         if p_photo:
                             player.photo_url = p_photo
 
@@ -441,6 +442,7 @@ class SyncService:
         # Buscar todos os jogadores do banco
         db_players = self.db.query(Player).all()
         players_map = {normalize_str(p.name): p for p in db_players}
+        cartola_id_map = {p.cartola_id: p for p in db_players if p.cartola_id}
         
         posicoes_map = {
             1: "Goleiro",
@@ -451,20 +453,58 @@ class SyncService:
             6: "Tecnico"
         }
 
+        from app.services.player_matcher_service import PlayerMatcherService
+        from app.models.team_profile import TeamProfile
+        matcher = PlayerMatcherService(self.db)
+        
+        # Cache team profiles to avoid repeated queries
+        team_profiles = {t.id: t.name for t in self.db.query(TeamProfile).all()}
+
         for atleta in atletas:
             apelido = normalize_str(atleta.get("apelido", ""))
+            atleta_id = atleta.get("atleta_id")
             status_id = atleta.get("status_id", 6)
             preco = atleta.get("preco_num", 0.0)
             posicao_id = atleta.get("posicao_id")
+            clube_id = atleta.get("clube_id")
             
             # Tenta casar o nome
-            db_player = players_map.get(apelido)
+            db_player = cartola_id_map.get(atleta_id) or players_map.get(apelido)
             if db_player:
                 db_player.cartola_status_id = status_id
                 db_player.price_cartoletas = preco
                 if posicao_id in posicoes_map:
                     db_player.position = posicoes_map[posicao_id]
+                
+                # Corrige bugs de transferencia: atualiza o time atual pelo Cartola Oficial
+                api_team_id = matcher.team_mapping.get(clube_id)
+                if api_team_id:
+                    db_player.team_id = api_team_id
+                    if api_team_id in team_profiles:
+                        db_player.team_name = team_profiles[api_team_id]
+                
                 synced += 1
+            elif posicao_id == 6:
+                api_team_id = matcher.team_mapping.get(clube_id)
+                if api_team_id:
+                    new_tecnico = Player(
+                        api_football_id=-atleta_id,
+                        cartola_id=atleta_id,
+                        name=atleta.get("nome", apelido),
+                        position="Tecnico",
+                        team_id=api_team_id,
+                        team_name=team_profiles.get(api_team_id),
+                        photo_url=atleta.get("foto"),
+                        price_cartoletas=preco,
+                        cartola_status_id=status_id
+                    )
+                    self.db.add(new_tecnico)
+                    self.db.flush()
+                    from app.models.player_score import PlayerScore
+                    ps = PlayerScore(player_id=new_tecnico.id, smart_score=5.0)
+                    self.db.add(ps)
+                    cartola_id_map[atleta_id] = new_tecnico
+                    synced += 1
 
         self.db.commit()
         return {

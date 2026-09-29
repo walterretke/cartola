@@ -11,6 +11,7 @@ router = APIRouter()
 def generate_teams(
     season_year: int = Query(..., description="Ano da temporada (ex: 2024)"),
     round_number: int = Query(..., description="Número da rodada (ex: 5)"),
+    max_cost: float = Query(None, description="Limite máximo de cartoletas para o time"),
     db: Session = Depends(get_db)
 ) -> Any:
     """
@@ -20,7 +21,7 @@ def generate_teams(
     """
     builder = TeamBuilderService(db)
     try:
-        teams = builder.generate_teams_for_round(season_year, round_number)
+        teams = builder.generate_teams_for_round(season_year, round_number, max_cost=max_cost)
         return {
             "status": "success",
             "message": f"Times gerados para a rodada {round_number} de {season_year}",

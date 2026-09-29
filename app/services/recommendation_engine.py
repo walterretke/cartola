@@ -42,6 +42,54 @@ class RecommendationEngine:
                 "reasoning": ["Sem dados do adversário. Usando Smart Score padrão."]
             }
 
+        import math
+        if player.position == "Tecnico":
+            team_profile = self.db.query(TeamProfile).filter(TeamProfile.id == player.team_id).first()
+            if not team_profile:
+                return None
+            
+            if is_home:
+                my_threat = team_profile.avg_goals_scored_home if team_profile.home_matches > 0 else team_profile.avg_goals_scored
+                my_defense = team_profile.avg_goals_conceded_home if team_profile.home_matches > 0 else team_profile.avg_goals_conceded
+                opp_threat = opponent.avg_goals_scored_away if opponent.away_matches > 0 else opponent.avg_goals_scored
+                opp_defense = opponent.avg_goals_conceded_away if opponent.away_matches > 0 else opponent.avg_goals_conceded
+            else:
+                my_threat = team_profile.avg_goals_scored_away if team_profile.away_matches > 0 else team_profile.avg_goals_scored
+                my_defense = team_profile.avg_goals_conceded_away if team_profile.away_matches > 0 else team_profile.avg_goals_conceded
+                opp_threat = opponent.avg_goals_scored_home if opponent.home_matches > 0 else opponent.avg_goals_scored
+                opp_defense = opponent.avg_goals_conceded_home if opponent.home_matches > 0 else opponent.avg_goals_conceded
+                
+            xg_for = (my_threat + opp_defense) / 2.0
+            xg_against = (my_defense + opp_threat) / 2.0
+            
+            xg_diff = xg_for - xg_against
+            win_prob = min(max(0.20 + (xg_diff * 0.25), 0.0), 0.95)
+            
+            sg_probability = math.exp(-xg_against) if xg_against > 0 else 0.4
+            
+            expected_score = 3.0 + (win_prob * 1.0) + (xg_for * 1.18) + (sg_probability * 2.27) - (xg_against * 0.22)
+            
+            reasoning = []
+            mando_str = "CASA" if is_home else "FORA"
+            reasoning.append(f"Joga em {mando_str}. Expectativa de gols (xG): {xg_for:.2f} pro, {xg_against:.2f} contra.")
+            reasoning.append(f"Probabilidade de Vitoria: {win_prob*100:.1f}% (+{win_prob*1.0:.2f} pts).")
+            reasoning.append(f"Probabilidade de SG: {sg_probability*100:.1f}% (+{sg_probability*2.27:.2f} pts).")
+            
+            return {
+                "player": {
+                    "id": player.id,
+                    "name": player.name,
+                    "position": player.position,
+                    "team_name": player.team_name,
+                    "photo_url": player.photo_url
+                },
+                "smart_score": player.score.smart_score,
+                "expected_score_contextual": round(expected_score, 2),
+                "is_home": is_home,
+                "opponent": opponent.name,
+                "sg_probability": round(sg_probability * 100, 1),
+                "reasoning": reasoning
+            }
         ps: PlayerScore = player.score
         reasoning = []
 
