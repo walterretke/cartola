@@ -6,6 +6,7 @@ from thefuzz import fuzz
 
 from app.models.player import Player
 from app.models.team_profile import TeamProfile
+from app.core.cartola import CARTOLA_POSITION_IDS
 
 class PlayerMatcherService:
     def __init__(self, db: Session):
@@ -92,7 +93,7 @@ class PlayerMatcherService:
             # Se encontrou alguǸm com boa similaridade
             if best_match and best_score >= 80:
                 # Vincula!
-                posicoes_map = {1: "Goleiro", 2: "Lateral", 3: "Zagueiro", 4: "Meia", 5: "Atacante", 6: "Tecnico"}
+                posicoes_map = CARTOLA_POSITION_IDS
                 best_match.cartola_id = cartola_id
                 # Aproveitamos para atualizar o preo e o status!
                 best_match.price_cartoletas = c_player.get("preco_num", 0.0)

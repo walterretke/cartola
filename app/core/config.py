@@ -1,8 +1,13 @@
+from typing import List
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
-    PROJECT_NAME: str = "CartolaAI Backend"
+    PROJECT_NAME: str = "Cartola Analytics API"
     API_V1_STR: str = "/api/v1"
+
+    # Origens liberadas no CORS (JSON no .env, ex: ["https://meusite.com"])
+    FRONTEND_ORIGINS: List[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
     
     # Banco de Dados
     DATABASE_URL: str = "sqlite:///./cartola.db"

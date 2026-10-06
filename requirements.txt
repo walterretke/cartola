@@ -7,3 +7,7 @@ alembic
 httpx
 python-dotenv
 psycopg2-binary
+psycopg[binary]
+thefuzz
+requests
+pytest

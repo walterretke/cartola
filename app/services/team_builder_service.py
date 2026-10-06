@@ -1,66 +1,98 @@
 import random
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 
+from app.core.cartola import (
+    DEFAULT_FORMATION,
+    FORMATIONS,
+    PLAYABLE_STATUSES,
+    round_name_from_number,
+)
 from app.models.fixture import Fixture
-from app.models.player import Player
 from app.models.player_match_stats import PlayerMatchStats
+from app.models.player_score import PlayerScore
 from app.models.team_recommendation import TeamRecommendation
 from app.services.recommendation_engine import RecommendationEngine
+
+STRATEGIES = ("PRINCIPAL", "ALTERNATIVO", "VALORIZACAO", "APOSTA")
+
 
 class TeamBuilderService:
     def __init__(self, db: Session):
         self.db = db
         self.engine = RecommendationEngine(db)
-        # Formação padrão solicitada: 4-3-3 (Posições do Cartola)
+        # Formação padrão: 4-3-3 (Posições do Cartola)
         # Ordenado do ataque para a defesa para priorizar escolhas ofensivas e evitar conflitos
-        self.formation = {'Atacante': 3, 'Meia': 3, 'Lateral': 2, 'Zagueiro': 2, 'Goleiro': 1, 'Tecnico': 1}
+        self.formation_name = DEFAULT_FORMATION
+        self.formation = dict(FORMATIONS[DEFAULT_FORMATION])
 
-    def generate_teams_for_round(self, season_year: int, round_number: int, max_cost: float = None) -> Dict[str, Any]:
+    def _last_scores(self, player_ids: List[int]) -> Dict[int, float]:
+        """Pontuação da última partida de cada jogador, em uma única consulta."""
+        if not player_ids:
+            return {}
+        rows = (
+            self.db.query(PlayerMatchStats.player_id, PlayerMatchStats.match_cartola_score)
+            .filter(PlayerMatchStats.player_id.in_(player_ids))
+            .order_by(PlayerMatchStats.player_id, desc(PlayerMatchStats.match_date))
+            .all()
+        )
+        last: Dict[int, float] = {}
+        for player_id, score in rows:
+            last.setdefault(player_id, score or 0.0)
+        return last
+
+    def _std_deviations(self, player_ids: List[int]) -> Dict[int, float]:
+        if not player_ids:
+            return {}
+        rows = (
+            self.db.query(PlayerScore.player_id, PlayerScore.std_deviation)
+            .filter(PlayerScore.player_id.in_(player_ids))
+            .all()
+        )
+        return {pid: std or 0.0 for pid, std in rows}
+
+    def generate_teams_for_round(
+        self,
+        season_year: int,
+        round_number: int,
+        max_cost: Optional[float] = None,
+        formation: str = DEFAULT_FORMATION,
+    ) -> Dict[str, Any]:
         """
-        Gera as 4 estratégias de escalação (Principal, Alternativo, Valorização, Aposta)
+        Gera as 4 estratégias de escalação (Principal, Alternativo, Valorização, Aposta).
+        Escalações anteriores da mesma rodada e estratégia são substituídas.
         """
-        fixtures = self.db.query(Fixture).filter(Fixture.round_name == f'Regular Season - {round_number}').all()
-        
+        if formation not in FORMATIONS:
+            raise ValueError(f"Formação inválida: {formation}. Use uma de {', '.join(FORMATIONS)}.")
+        self.formation_name = formation
+        self.formation = dict(FORMATIONS[formation])
+
+        fixtures = self.db.query(Fixture).filter(Fixture.round_name == round_name_from_number(round_number)).all()
+
         all_recs = []
         for f in fixtures:
-            # Obter recomendações com o ESC
-            recs = self.engine.get_recommendations_for_fixture(f.id, limit=60)
-            for r in recs:
-                player_obj = self.db.query(Player).filter(Player.id == r['player']['id']).first()
-                if not player_obj:
-                    continue
-                
+            # Projeções de todos os jogadores da partida
+            for r in self.engine.get_recommendations_for_fixture(f.id, limit=60):
                 # Regra 5: Somente status "Provável" (7) e "Dúvida" (2)
-                if player_obj.cartola_status_id not in (2, 7):
+                if r["player"]["status_id"] not in PLAYABLE_STATUSES:
                     continue
-                
-                # Adicionar dados extras como last_score, price, std_deviation
-                last_stat = self.db.query(PlayerMatchStats).filter(
-                    PlayerMatchStats.player_id == player_obj.id
-                ).order_by(desc(PlayerMatchStats.match_date)).first()
-                
-                r['last_score'] = last_stat.match_cartola_score if last_stat else 0.0
-                r['price'] = player_obj.price_cartoletas
-                r['std_deviation'] = player_obj.score.std_deviation if player_obj.score else 0.0
-                r['team_id'] = player_obj.team_id
-                r['opponent_id'] = f.away_team_id if player_obj.team_id == f.home_team_id else f.home_team_id
-                
-                # Ajuste de posição caso a sincronização ainda tenha posições em inglês
-                pos = player_obj.position
-                if pos == 'Goalkeeper': pos = 'Goleiro'
-                elif pos == 'Defender': pos = 'Zagueiro'
-                elif pos == 'Midfielder': pos = 'Meia'
-                elif pos == 'Attacker': pos = 'Atacante'
-                r['player']['position'] = pos
-                
                 all_recs.append(r)
 
-        # Separar por posição
-        players_by_pos = {'Goleiro': [], 'Lateral': [], 'Zagueiro': [], 'Meia': [], 'Atacante': [], 'Tecnico': []}
+        player_ids = [r["player"]["id"] for r in all_recs]
+        last_scores = self._last_scores(player_ids)
+        std_devs = self._std_deviations(player_ids)
         for r in all_recs:
-            pos = r['player']['position']
+            pid = r["player"]["id"]
+            r["last_score"] = last_scores.get(pid, 0.0)
+            r["price"] = r["player"]["price"]
+            r["std_deviation"] = std_devs.get(pid, 0.0)
+            r["team_id"] = r["player"]["team_id"]
+
+        # Separar por posição (o motor já devolve a posição no padrão do Cartola)
+        players_by_pos = {pos: [] for pos in self.formation}
+        for r in all_recs:
+            pos = r["player"]["position"]
             if pos in players_by_pos:
                 players_by_pos[pos].append(r)
 
@@ -71,20 +103,25 @@ class TeamBuilderService:
             "APOSTA": self._build_aposta(players_by_pos, max_cost)
         }
 
-        # Salvar no banco
+        # Substitui as escalações anteriores desta rodada (evita registros duplicados)
+        self.db.query(TeamRecommendation).filter(
+            TeamRecommendation.season_year == season_year,
+            TeamRecommendation.round_number == round_number,
+        ).delete(synchronize_session=False)
+
         for strategy, squad in teams.items():
+            squad["formation"] = formation
             if squad["players"]:
-                rec = TeamRecommendation(
+                self.db.add(TeamRecommendation(
                     season_year=season_year,
                     round_number=round_number,
                     strategy=strategy,
-                    formation="4-3-3",
+                    formation=formation,
                     expected_total_score=squad["expected_score"],
                     expected_total_cost=squad["cost"],
                     squad_data=squad
-                )
-                self.db.add(rec)
-        
+                ))
+
         self.db.commit()
         return teams
 

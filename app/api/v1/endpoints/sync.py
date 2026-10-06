@@ -3,8 +3,16 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db
 from app.services.sync_service import SyncService
 from app.services.scoring_engine import ScoringEngine
+from app.services.round_service import RoundService
+from app.schemas.fixture import SystemStatusResponse
 
 router = APIRouter()
+
+
+@router.get("/status", response_model=SystemStatusResponse)
+def sync_status(db: Session = Depends(get_db)):
+    """Contagem dos dados no banco e horário do último recálculo das notas."""
+    return RoundService(db).system_status()
 
 
 @router.post("/run")
@@ -65,7 +73,7 @@ async def sync_cartola_status(db: Session = Depends(get_db)):
 @router.post("/match-cartola-ids")
 def match_cartola_ids(db: Session = Depends(get_db)):
     """
-    Roda a inteligência de 'Fuzzy String Matching' para mapear os 
+    Roda o vínculo por similaridade de nomes ('Fuzzy String Matching') para mapear os 
     IDs do Cartola FC com os IDs dos jogadores já existentes da API-Football.
     """
     from app.services.player_matcher_service import PlayerMatcherService

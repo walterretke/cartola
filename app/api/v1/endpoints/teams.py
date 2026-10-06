@@ -7,7 +7,7 @@ from app.services.team_builder_service import TeamBuilderService
 
 router = APIRouter()
 
-@router.post("/generate")
+@router.post("/generate", deprecated=True)
 def generate_teams(
     season_year: int = Query(..., description="Ano da temporada (ex: 2024)"),
     round_number: int = Query(..., description="Número da rodada (ex: 5)"),
@@ -15,8 +15,8 @@ def generate_teams(
     db: Session = Depends(get_db)
 ) -> Any:
     """
-    Gatilha a inteligência artificial para montar as 4 estratégias de times 
-    da rodada (Principal, Alternativo, Valorização e Aposta).
+    Monta as 4 estratégias de times da rodada (Principal, Alternativo, Valorização e Aposta).
+    Obsoleto: use POST /lineups/build.
     Os times gerados são salvos no banco de dados e retornados na resposta.
     """
     builder = TeamBuilderService(db)

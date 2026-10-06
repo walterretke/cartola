@@ -7,6 +7,14 @@ from app.models.player import Player
 from app.models.player_match_stats import PlayerMatchStats
 from app.services.api_football_client import ApiFootballClient
 from app.services.scoring_engine import ScoringEngine
+from app.core.cartola import (
+    CARTOLA_POSITION_IDS,
+    DEFENSIVE_POSITIONS,
+    GOLEIRO,
+    TECNICO,
+    merge_position,
+    normalize_position,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -166,10 +174,9 @@ class SyncService:
                     if minutes == 0:
                         continue  # Não jogou
 
-                    position_raw = games_data.get("position", "Midfielder")
-                    # Normalizar posição: G -> Goalkeeper, D -> Defender, M -> Midfielder, F -> Attacker
-                    POSITION_MAP = {"G": "Goalkeeper", "D": "Defender", "M": "Midfielder", "F": "Attacker"}
-                    position = POSITION_MAP.get(position_raw, position_raw)
+                    position_raw = games_data.get("position", "M")
+                    # Normaliza para o padrão do Cartola: G -> Goleiro, D -> Zagueiro, M -> Meia, F -> Atacante
+                    position = normalize_position(position_raw)
 
                     rating_str = games_data.get("rating")
                     rating = float(rating_str) if rating_str else None
@@ -231,9 +238,9 @@ class SyncService:
                     offsides_count = offsides_val or 0
 
                     # SG: clean sheet aplica-se a Goleiros e Defensores
-                    apply_clean_sheet = is_clean_sheet and position in ("Goalkeeper", "Defender")
+                    apply_clean_sheet = is_clean_sheet and position in DEFENSIVE_POSITIONS
                     # GS: gols sofridos aplicam-se ao Goleiro
-                    apply_goals_conceded = player_conceded if position == "Goalkeeper" else 0
+                    apply_goals_conceded = player_conceded if position == GOLEIRO else 0
 
                     # ===== Upsert Player =====
                     player = self.db.query(Player).filter(
@@ -256,7 +263,7 @@ class SyncService:
                         if not player.cartola_id:
                             player.team_id = current_team_id
                             player.team_name = current_team_name
-                            player.position = position
+                            player.position = merge_position(player.position, position)
                         if p_photo:
                             player.photo_url = p_photo
 
@@ -444,14 +451,7 @@ class SyncService:
         players_map = {normalize_str(p.name): p for p in db_players}
         cartola_id_map = {p.cartola_id: p for p in db_players if p.cartola_id}
         
-        posicoes_map = {
-            1: "Goleiro",
-            2: "Lateral",
-            3: "Zagueiro",
-            4: "Meia",
-            5: "Atacante",
-            6: "Tecnico"
-        }
+        posicoes_map = CARTOLA_POSITION_IDS
 
         from app.services.player_matcher_service import PlayerMatcherService
         from app.models.team_profile import TeamProfile
@@ -491,7 +491,7 @@ class SyncService:
                         api_football_id=-atleta_id,
                         cartola_id=atleta_id,
                         name=atleta.get("nome", apelido),
-                        position="Tecnico",
+                        position=TECNICO,
                         team_id=api_team_id,
                         team_name=team_profiles.get(api_team_id),
                         photo_url=atleta.get("foto"),

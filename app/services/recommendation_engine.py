@@ -1,225 +1,393 @@
 import math
-from typing import Optional, List, Dict
-from sqlalchemy.orm import Session
-from sqlalchemy import desc
+from datetime import datetime, timezone
+from typing import Optional, List, Dict, Iterable
 
+from sqlalchemy.orm import Session, joinedload
+
+from app.core.cartola import (
+    DEFENSIVE_POSITIONS,
+    TECNICO,
+    normalize_position,
+    round_name_from_number,
+    status_label,
+    team_logo_url,
+)
 from app.models.player import Player
 from app.models.player_score import PlayerScore
 from app.models.team_profile import TeamProfile
 from app.models.fixture import Fixture
 
+
+def _num(value: float, decimals: int = 2) -> str:
+    """Formata número no padrão brasileiro (vírgula decimal)."""
+    return f"{value:.{decimals}f}".replace(".", ",")
+
+
+def _pct(value: float) -> str:
+    return f"{value * 100:.0f}%"
+
+
+def iso_utc(dt: Optional[datetime]) -> Optional[str]:
+    """As datas do banco são UTC sem fuso. Devolve ISO com fuso explícito (seguro para JSON)."""
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
 class RecommendationEngine:
     """
-    Motor Contextual: Calcula o Expected Score Contextual (ESC) de um jogador
-    para uma partida específica (Next Fixture).
+    Motor Contextual: calcula a projeção de pontos (Expected Score Contextual, ESC)
+    de um atleta para uma partida específica.
+
+    Além do número final, devolve `factors`: a decomposição aditiva da projeção,
+    em que a soma de `impact_pts` é igual a `expected_score_contextual`.
     """
 
     def __init__(self, db: Session):
         self.db = db
+        self._teams: Optional[Dict[int, TeamProfile]] = None
 
+    # ================================================================
+    # Helpers
+    # ================================================================
+    @property
+    def teams(self) -> Dict[int, TeamProfile]:
+        if self._teams is None:
+            self._teams = {t.id: t for t in self.db.query(TeamProfile).all()}
+        return self._teams
+
+    @staticmethod
+    def opponent_threat(opponent: TeamProfile, is_home: bool) -> float:
+        """Média de gols marcados pelo adversário no mando em que ele vai jogar."""
+        if is_home:  # adversário joga fora
+            return opponent.avg_goals_scored_away if opponent.away_matches > 0 else opponent.avg_goals_scored
+        return opponent.avg_goals_scored_home if opponent.home_matches > 0 else opponent.avg_goals_scored
+
+    @staticmethod
+    def opponent_defense_weakness(opponent: TeamProfile, is_home: bool) -> float:
+        """Média de gols sofridos pelo adversário no mando em que ele vai jogar."""
+        if is_home:
+            return opponent.avg_goals_conceded_away if opponent.away_matches > 0 else opponent.avg_goals_conceded
+        return opponent.avg_goals_conceded_home if opponent.home_matches > 0 else opponent.avg_goals_conceded
+
+    @classmethod
+    def sg_probability_for(cls, opponent: TeamProfile, is_home: bool) -> float:
+        """Probabilidade de não sofrer gol (Poisson P(X=0)), ajustada pelo mando."""
+        threat = cls.opponent_threat(opponent, is_home)
+        if threat == 0.0:
+            return 0.40  # Padrão conservador sem dados
+        adjusted_threat = threat * (0.85 if is_home else 1.15)
+        return math.exp(-adjusted_threat)
+
+    @staticmethod
+    def _player_ref(player: Player) -> Dict:
+        return {
+            "id": player.id,
+            "name": player.name,
+            "position": normalize_position(player.position),
+            "team_id": player.team_id,
+            "team_name": player.team_name,
+            "team_logo_url": team_logo_url(player.team_id),
+            "photo_url": player.photo_url,
+            "price": player.price_cartoletas or 0.0,
+            "status_id": player.cartola_status_id,
+            "status_label": status_label(player.cartola_status_id),
+        }
+
+    def _base_result(self, player: Player, fixture: Fixture, is_home: bool, opponent_id: int) -> Dict:
+        opponent = self.teams.get(opponent_id)
+        return {
+            "player": self._player_ref(player),
+            "fixture_id": fixture.id,
+            "match_date": iso_utc(fixture.match_date),
+            "is_home": is_home,
+            "opponent_id": opponent_id,
+            "opponent": opponent.name if opponent else None,
+            "opponent_logo_url": team_logo_url(opponent_id),
+            "smart_score": player.score.smart_score if player.score else 0.0,
+        }
+
+    # ================================================================
+    # Cálculo
+    # ================================================================
     def calculate_esc_for_player(self, player_id: int, next_fixture_id: int) -> Optional[Dict]:
-        """
-        Calcula o Expected Score Contextual para o jogador X na partida Y.
-        Retorna o dicionário de análise.
-        """
-        player = self.db.query(Player).filter(Player.id == player_id).first()
+        """Calcula a projeção do jogador X na partida Y."""
+        player = (
+            self.db.query(Player)
+            .options(joinedload(Player.score))
+            .filter(Player.id == player_id)
+            .first()
+        )
         fixture = self.db.query(Fixture).filter(Fixture.id == next_fixture_id).first()
-        
-        if not player or not player.score or not fixture:
+        if not player or not fixture:
+            return None
+        return self.calculate(player, fixture)
+
+    def calculate(self, player: Player, fixture: Fixture) -> Optional[Dict]:
+        if not player.score:
+            return None
+        if player.team_id not in (fixture.home_team_id, fixture.away_team_id):
             return None
 
-        # Determinar mando de campo
-        is_home = (player.team_id == fixture.home_team_id)
-        opponent_team_id = fixture.away_team_id if is_home else fixture.home_team_id
-        
-        opponent = self.db.query(TeamProfile).filter(TeamProfile.id == opponent_team_id).first()
+        is_home = player.team_id == fixture.home_team_id
+        opponent_id = fixture.away_team_id if is_home else fixture.home_team_id
+        opponent = self.teams.get(opponent_id)
+        result = self._base_result(player, fixture, is_home, opponent_id)
+        position = normalize_position(player.position)
+
         if not opponent:
-            # Fallback seguro se não houver perfil do adversário
-            return {
-                "player_id": player.id,
-                "fixture_id": fixture.id,
-                "esc": player.score.smart_score,
-                "reasoning": ["Sem dados do adversário. Usando Smart Score padrão."]
-            }
+            esc = player.score.smart_score
+            result.update({
+                "expected_score_contextual": round(esc, 2),
+                "sg_probability": None,
+                "reasoning": ["Ainda não temos dados do adversário. A projeção usa a nota geral do jogador."],
+                "factors": [self._factor("base", "Nota geral", esc, "Sem dados do adversário")],
+                "context": self._context(player.score),
+            })
+            return result
 
-        import math
-        if player.position == "Tecnico":
-            team_profile = self.db.query(TeamProfile).filter(TeamProfile.id == player.team_id).first()
-            if not team_profile:
-                return None
-            
-            if is_home:
-                my_threat = team_profile.avg_goals_scored_home if team_profile.home_matches > 0 else team_profile.avg_goals_scored
-                my_defense = team_profile.avg_goals_conceded_home if team_profile.home_matches > 0 else team_profile.avg_goals_conceded
-                opp_threat = opponent.avg_goals_scored_away if opponent.away_matches > 0 else opponent.avg_goals_scored
-                opp_defense = opponent.avg_goals_conceded_away if opponent.away_matches > 0 else opponent.avg_goals_conceded
-            else:
-                my_threat = team_profile.avg_goals_scored_away if team_profile.away_matches > 0 else team_profile.avg_goals_scored
-                my_defense = team_profile.avg_goals_conceded_away if team_profile.away_matches > 0 else team_profile.avg_goals_conceded
-                opp_threat = opponent.avg_goals_scored_home if opponent.home_matches > 0 else opponent.avg_goals_scored
-                opp_defense = opponent.avg_goals_conceded_home if opponent.home_matches > 0 else opponent.avg_goals_conceded
-                
-            xg_for = (my_threat + opp_defense) / 2.0
-            xg_against = (my_defense + opp_threat) / 2.0
-            
-            xg_diff = xg_for - xg_against
-            win_prob = min(max(0.20 + (xg_diff * 0.25), 0.0), 0.95)
-            
-            sg_probability = math.exp(-xg_against) if xg_against > 0 else 0.4
-            
-            expected_score = 3.0 + (win_prob * 1.0) + (xg_for * 1.18) + (sg_probability * 2.27) - (xg_against * 0.22)
-            
-            reasoning = []
-            mando_str = "CASA" if is_home else "FORA"
-            reasoning.append(f"Joga em {mando_str}. Expectativa de gols (xG): {xg_for:.2f} pro, {xg_against:.2f} contra.")
-            reasoning.append(f"Probabilidade de Vitoria: {win_prob*100:.1f}% (+{win_prob*1.0:.2f} pts).")
-            reasoning.append(f"Probabilidade de SG: {sg_probability*100:.1f}% (+{sg_probability*2.27:.2f} pts).")
-            
-            return {
-                "player": {
-                    "id": player.id,
-                    "name": player.name,
-                    "position": player.position,
-                    "team_name": player.team_name,
-                    "photo_url": player.photo_url
-                },
-                "smart_score": player.score.smart_score,
-                "expected_score_contextual": round(expected_score, 2),
-                "is_home": is_home,
-                "opponent": opponent.name,
-                "sg_probability": round(sg_probability * 100, 1),
-                "reasoning": reasoning
-            }
-        ps: PlayerScore = player.score
-        reasoning = []
+        if position == TECNICO:
+            return self._calculate_coach(player, is_home, opponent, result)
+        return self._calculate_player(player, position, is_home, opponent, result)
 
-        # 1. Base Contextual (Mando de Campo)
+    @staticmethod
+    def _factor(key: str, label: str, impact: float, detail: str, multiplier: Optional[float] = None) -> Dict:
+        return {
+            "key": key,
+            "label": label,
+            "detail": detail,
+            "multiplier": round(multiplier, 3) if multiplier is not None else None,
+            "impact_pts": round(impact, 2),
+        }
+
+    @staticmethod
+    def _context(ps: PlayerScore) -> Dict:
+        return {
+            "matches_played": ps.matches_played,
+            "home_matches": ps.home_matches,
+            "away_matches": ps.away_matches,
+            "avg_points": ps.avg_points,
+            "avg_points_home": ps.avg_points_home,
+            "avg_points_away": ps.avg_points_away,
+            "avg_minutes": round(ps.total_minutes / max(ps.matches_played, 1), 1),
+            "ema_points": ps.ema_points,
+            "trend": ps.trend,
+            "consistency_index": ps.consistency_index,
+        }
+
+    def _calculate_coach(self, player: Player, is_home: bool, opponent: TeamProfile, result: Dict) -> Optional[Dict]:
+        team_profile = self.teams.get(player.team_id)
+        if not team_profile:
+            return None
+
         if is_home:
-            base_score = ps.avg_points_home
-            context_matches = ps.home_matches
-            reasoning.append(f"Joga em CASA (Média casa: {base_score:.2f})")
+            my_threat = team_profile.avg_goals_scored_home if team_profile.home_matches > 0 else team_profile.avg_goals_scored
+            my_defense = team_profile.avg_goals_conceded_home if team_profile.home_matches > 0 else team_profile.avg_goals_conceded
         else:
-            base_score = ps.avg_points_away
-            context_matches = ps.away_matches
-            reasoning.append(f"Joga FORA (Média fora: {base_score:.2f})")
+            my_threat = team_profile.avg_goals_scored_away if team_profile.away_matches > 0 else team_profile.avg_goals_scored
+            my_defense = team_profile.avg_goals_conceded_away if team_profile.away_matches > 0 else team_profile.avg_goals_conceded
+        opp_threat = self.opponent_threat(opponent, is_home)
+        opp_defense = self.opponent_defense_weakness(opponent, is_home)
 
-        # Blend se amostragem no mando for baixa
-        if context_matches < 3:
-            weight = context_matches / 3.0
-            base_score = (base_score * weight) + (ps.avg_points * (1 - weight))
-            reasoning.append("Amostragem de mando baixa, mesclando com média geral.")
+        xg_for = (my_threat + opp_defense) / 2.0
+        xg_against = (my_defense + opp_threat) / 2.0
+        win_prob = min(max(0.20 + ((xg_for - xg_against) * 0.25), 0.0), 0.95)
+        sg_probability = math.exp(-xg_against) if xg_against > 0 else 0.4
 
-        # 2. Ponderação com Momentum (Fator 7 - Agora usando Média Móvel Exponencial)
-        weighted_base = ps.ema_points
-        
+        factors = [
+            self._factor("base", "Base do técnico", 3.0, "Pontuação de referência de um técnico"),
+            self._factor("win", "Chance de vitória", win_prob * 1.0, f"{_pct(win_prob)} de chance de vencer"),
+            self._factor("goals_for", "Gols a favor", xg_for * 1.18, f"{_num(xg_for)} gols esperados a favor"),
+            self._factor("sg", "Chance de SG", sg_probability * 2.27, f"{_pct(sg_probability)} de chance de não sofrer gol"),
+            self._factor("goals_against", "Gols contra", -(xg_against * 0.22), f"{_num(xg_against)} gols esperados contra"),
+        ]
+        expected_score = 3.0 + (win_prob * 1.0) + (xg_for * 1.18) + (sg_probability * 2.27) - (xg_against * 0.22)
+
+        mando = "em casa" if is_home else "fora de casa"
+        result.update({
+            "expected_score_contextual": round(expected_score, 2),
+            "sg_probability": round(sg_probability * 100, 1),
+            "reasoning": [
+                f"Joga {mando} contra o {opponent.name}: {_num(xg_for)} gols esperados a favor e {_num(xg_against)} contra.",
+                f"Chance de vitória de {_pct(win_prob)}.",
+                f"Chance de não sofrer gol de {_pct(sg_probability)}.",
+            ],
+            "factors": factors,
+            "context": self._context(player.score),
+        })
+        return result
+
+    def _calculate_player(self, player: Player, position: str, is_home: bool, opponent: TeamProfile, result: Dict) -> Dict:
+        ps: PlayerScore = player.score
+        reasoning: List[str] = []
+        factors: List[Dict] = []
+
+        # 1. Contexto de mando (informativo: a projeção parte da forma recente)
+        if is_home:
+            reasoning.append(f"Joga em casa, onde faz {_num(ps.avg_points_home)} pts de média em {ps.home_matches} jogos.")
+        else:
+            reasoning.append(f"Joga fora, onde faz {_num(ps.avg_points_away)} pts de média em {ps.away_matches} jogos.")
+
+        # 2. Forma recente (Média Móvel Exponencial)
+        running = ps.ema_points
+        factors.append(self._factor("form", "Forma recente", running, "Média ponderada que valoriza os últimos jogos"))
+
         if ps.trend == "rising":
             momentum_mod = 1.06
-            reasoning.append("Momentum de alta (+6%).")
+            reasoning.append("Está em alta: as últimas 5 rodadas estão acima da média dele.")
         elif ps.trend == "falling":
             momentum_mod = 0.94
-            reasoning.append("Momentum de queda (-6%).")
+            reasoning.append("Está em queda: as últimas 5 rodadas estão abaixo da média dele.")
         else:
             momentum_mod = 1.0
 
-        # 3. Probabilidade de Clean Sheet (Fator 4) & Força Adversária (Fator 2 e 3)
-        # Ajuste de ameaça baseado na média de gols do adversário no mando atual
-        if is_home:
-            opp_threat = opponent.avg_goals_scored_away if opponent.away_matches > 0 else opponent.avg_goals_scored
-            opp_defense_weakness = opponent.avg_goals_conceded_away if opponent.away_matches > 0 else opponent.avg_goals_conceded
-        else:
-            opp_threat = opponent.avg_goals_scored_home if opponent.home_matches > 0 else opponent.avg_goals_scored
-            opp_defense_weakness = opponent.avg_goals_conceded_home if opponent.home_matches > 0 else opponent.avg_goals_conceded
-
-        sg_probability = 0.0
+        # 3. Adversário: chance de SG (defensores) ou fragilidade da defesa (meias/atacantes)
+        sg_probability: Optional[float] = None
         opponent_factor = 1.0
+        opp_threat = self.opponent_threat(opponent, is_home)
+        opp_defense_weakness = self.opponent_defense_weakness(opponent, is_home)
 
-        if player.position in ("Goalkeeper", "Defender"):
-            # Poisson P(X=0)
-            if opp_threat == 0.0:
-                sg_probability = 0.40 # Padrão conservador se sem dados
-            else:
-                # Se meu time sofre poucos gols, a ameaça diminui. 
-                # (Simplificação: usamos apenas a ameaça adversária pura com ajuste de mando)
-                adjusted_threat = opp_threat * (0.85 if is_home else 1.15)
-                sg_probability = math.exp(-adjusted_threat)
-            
+        if position in DEFENSIVE_POSITIONS:
+            sg_probability = self.sg_probability_for(opponent, is_home)
             sg_expected_pts = sg_probability * 5.0
-            reasoning.append(f"Adversário marca {opp_threat:.2f} gols no cenário. Probabilidade de SG: {sg_probability*100:.1f}% (+{sg_expected_pts:.2f} pts).")
-            
-            # Adiciona a expectativa de SG na base
-            weighted_base += (sg_expected_pts * 0.4) # Peso parcial pois média já contém SGs passados
-            
+            sg_contribution = sg_expected_pts * 0.4  # Peso parcial: a média já contém SGs passados
+            running += sg_contribution
+            factors.append(self._factor(
+                "sg", "Chance de SG", sg_contribution,
+                f"{_pct(sg_probability)} de chance de não sofrer gol",
+            ))
+            reasoning.append(
+                f"O {opponent.name} marca {_num(opp_threat)} gols por jogo nesse mando. "
+                f"Chance de SG de {_pct(sg_probability)}."
+            )
         else:
-            # Atacantes e Meias: adversário com defesa fraca é bom
             if opp_defense_weakness > 1.5:
                 opponent_factor = 1.15
-                reasoning.append(f"Defesa adversária FRACA ({opp_defense_weakness:.2f} gols/jogo). Bônus ofensivo (+15%).")
-            elif opp_defense_weakness < 0.8 and opp_defense_weakness > 0:
+                reasoning.append(f"A defesa do {opponent.name} é frágil: sofre {_num(opp_defense_weakness)} gols por jogo nesse mando.")
+            elif 0 < opp_defense_weakness < 0.8:
                 opponent_factor = 0.85
-                reasoning.append(f"Defesa adversária FORTE ({opp_defense_weakness:.2f} gols/jogo). Penalidade ofensiva (-15%).")
+                reasoning.append(f"A defesa do {opponent.name} é sólida: sofre só {_num(opp_defense_weakness)} gols por jogo nesse mando.")
 
-        # 4. Consistência e Minutos (Fatores 6 e 8)
-        consistency_mod = 0.92 + (ps.consistency_index / 100.0) * 0.16
-        if consistency_mod > 1.0:
-            reasoning.append("Jogador muito consistente (Ajuste de segurança positivo).")
+        def apply(key: str, label: str, mod: float, detail: str):
+            nonlocal running
+            delta = running * (mod - 1.0)
+            running *= mod
+            factors.append(self._factor(key, label, delta, detail, multiplier=mod))
 
+        if opponent_factor != 1.0:
+            apply("opponent", "Defesa adversária", opponent_factor,
+                  f"{opponent.name} sofre {_num(opp_defense_weakness)} gols por jogo")
+
+        if momentum_mod != 1.0:
+            apply("momentum", "Fase", momentum_mod, "Em alta" if momentum_mod > 1 else "Em queda")
+
+        # 4. Minutagem
         avg_minutes = ps.total_minutes / max(ps.matches_played, 1)
         if avg_minutes >= 80:
             minutes_mod = 1.0
         elif avg_minutes >= 60:
             minutes_mod = 0.85
-            reasoning.append("Risco de substituição antecipada (-15%).")
+            reasoning.append(f"Costuma ser substituído: joga {avg_minutes:.0f} minutos em média.")
         elif avg_minutes >= 30:
             minutes_mod = 0.60
-            reasoning.append("Risco alto: Reserva de uso frequente (-40%).")
+            reasoning.append(f"Entra muito do banco: joga {avg_minutes:.0f} minutos em média.")
         else:
             minutes_mod = 0.30
-            reasoning.append("Risco CRÍTICO: Dificilmente joga o tempo suficiente (-70%).")
+            reasoning.append(f"Joga pouco: {avg_minutes:.0f} minutos em média por partida.")
+        if minutes_mod != 1.0:
+            apply("minutes", "Minutagem", minutes_mod, f"{avg_minutes:.0f} minutos por jogo")
 
-        # Cálculo Final
-        esc = (
-            weighted_base
-            * opponent_factor
-            * momentum_mod
-            * minutes_mod
-            * consistency_mod
+        # 5. Regularidade
+        consistency_mod = 0.92 + (ps.consistency_index / 100.0) * 0.16
+        if consistency_mod > 1.0:
+            reasoning.append(f"É regular: índice de regularidade {ps.consistency_index:.0f} de 100.")
+        apply("consistency", "Regularidade", consistency_mod, f"Índice {ps.consistency_index:.0f} de 100")
+
+        # 6. Limite de segurança para valores extremos
+        esc = max(-2.0, min(running, 25.0))
+        if esc != running:
+            factors.append(self._factor("cap", "Limite", esc - running, "Projeção limitada entre -2 e 25 pontos"))
+
+        result.update({
+            "expected_score_contextual": round(esc, 2),
+            "sg_probability": round(sg_probability * 100, 1) if sg_probability is not None else None,
+            "reasoning": reasoning,
+            "factors": factors,
+            "context": self._context(ps),
+        })
+        return result
+
+    # ================================================================
+    # Consultas em lote
+    # ================================================================
+    def _players_of_teams(self, team_ids: Iterable[int]) -> List[Player]:
+        return (
+            self.db.query(Player)
+            .options(joinedload(Player.score))
+            .filter(Player.team_id.in_(list(team_ids)))
+            .all()
         )
 
-        # Se o ESC ficar absurdo (muito pequeno ou muito grande), aplicar limite amigável
-        esc = max(-2.0, min(esc, 25.0))
-
-        return {
-            "player": {
-                "id": player.id,
-                "name": player.name,
-                "position": player.position,
-                "team_name": player.team_name,
-                "photo_url": player.photo_url
-            },
-            "smart_score": ps.smart_score,
-            "expected_score_contextual": round(esc, 2),
-            "is_home": is_home,
-            "opponent": opponent.name,
-            "sg_probability": round(sg_probability * 100, 1) if player.position in ("Goalkeeper", "Defender") else None,
-            "reasoning": reasoning
-        }
-
     def get_recommendations_for_fixture(self, fixture_id: int, limit: int = 11) -> List[Dict]:
-        """Gera recomendações de ambos os times para uma partida."""
+        """Projeções dos jogadores dos dois times de uma partida, da maior para a menor."""
         fixture = self.db.query(Fixture).filter(Fixture.id == fixture_id).first()
         if not fixture:
             return []
-            
-        players = self.db.query(Player).filter(
-            Player.team_id.in_([fixture.home_team_id, fixture.away_team_id])
-        ).all()
-        
-        recs = []
-        for p in players:
-            r = self.calculate_esc_for_player(p.id, fixture_id)
-            if r:
-                recs.append(r)
-                
-        # Ordena pelo maior ESC
+        recs = [
+            r for p in self._players_of_teams([fixture.home_team_id, fixture.away_team_id])
+            if (r := self.calculate(p, fixture))
+        ]
         recs.sort(key=lambda x: x["expected_score_contextual"], reverse=True)
         return recs[:limit]
+
+    def get_recommendations_for_round(
+        self,
+        round_number: int,
+        position: Optional[str] = None,
+        statuses: Optional[Iterable[int]] = None,
+        limit: int = 50,
+    ) -> List[Dict]:
+        """Projeções de todos os jogadores da rodada, da maior para a menor."""
+        fixtures = self.db.query(Fixture).filter(Fixture.round_name == round_name_from_number(round_number)).all()
+        by_team: Dict[int, Fixture] = {}
+        for f in fixtures:
+            by_team[f.home_team_id] = f
+            by_team[f.away_team_id] = f
+        if not by_team:
+            return []
+
+        wanted_position = normalize_position(position) if position else None
+        wanted_status = set(statuses) if statuses else None
+        recs = []
+        for p in self._players_of_teams(by_team.keys()):
+            if wanted_position and normalize_position(p.position) != wanted_position:
+                continue
+            if wanted_status and p.cartola_status_id not in wanted_status:
+                continue
+            r = self.calculate(p, by_team[p.team_id])
+            if r:
+                recs.append(r)
+        recs.sort(key=lambda x: x["expected_score_contextual"], reverse=True)
+        return recs[:limit]
+
+    def get_next_projection(self, player_id: int, round_number: int) -> Optional[Dict]:
+        """Projeção do jogador para o jogo do time dele na rodada informada."""
+        player = (
+            self.db.query(Player)
+            .options(joinedload(Player.score))
+            .filter(Player.id == player_id)
+            .first()
+        )
+        if not player or not player.team_id:
+            return None
+        fixture = (
+            self.db.query(Fixture)
+            .filter(Fixture.round_name == round_name_from_number(round_number))
+            .filter((Fixture.home_team_id == player.team_id) | (Fixture.away_team_id == player.team_id))
+            .first()
+        )
+        if not fixture:
+            return None
+        return self.calculate(player, fixture)

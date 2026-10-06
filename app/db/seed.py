@@ -1,6 +1,22 @@
 from app.db.session import SessionLocal, engine
 from app.db.base import Base
 from app.models.scout_action import ScoutAction
+from app.models.player import Player
+from app.core.cartola import normalize_position
+
+LEGACY_POSITIONS = ("Goalkeeper", "Defender", "Midfielder", "Attacker")
+
+
+def normalize_stored_positions(db) -> int:
+    """Converte posições gravadas em inglês (API-Football) para o padrão do Cartola."""
+    updated = 0
+    for legacy in LEGACY_POSITIONS:
+        updated += (
+            db.query(Player)
+            .filter(Player.position == legacy)
+            .update({Player.position: normalize_position(legacy)}, synchronize_session=False)
+        )
+    return updated
 
 # 20 Scouts Oficiais do Cartola FC (Dados Mestre)
 CARTOLA_SCOUT_ACTIONS = [
@@ -195,6 +211,10 @@ def init_db():
                 action.is_goalkeeper_only = item["is_goalkeeper_only"]
                 count_updated += 1
         
+        normalized = normalize_stored_positions(db)
+        if normalized:
+            print(f"Posições normalizadas para o padrão do Cartola: {normalized} jogadores.")
+
         db.commit()
         print(f"Sucesso: {count_created} scouts criados, {count_updated} atualizados. Total: {len(CARTOLA_SCOUT_ACTIONS)} scouts cadastrados.")
     except Exception as e:

@@ -6,6 +6,7 @@ from app.models.scout_action import ScoutAction
 from app.models.player import Player
 from app.models.player_match_stats import PlayerMatchStats
 from app.models.player_score import PlayerScore
+from app.core.cartola import GOLEIRO, LATERAL, ZAGUEIRO, MEIA, ATACANTE, normalize_position
 
 logger = logging.getLogger(__name__)
 
@@ -25,14 +26,14 @@ class ScoringEngine:
     # Cada posição tem pesos diferentes que refletem o que REALMENTE importa
     # para gerar pontuação consistente no Cartola
     POSITION_WEIGHTS = {
-        "Goalkeeper": {
+        GOLEIRO: {
             # Goleiro pontua MUITO com SG (+5.0 por jogo!) e DE (+1.3 cada defesa).
             # DP (+7.0) é raro mas devastador. Gols sofridos (-1.0 cada) destroem.
             "offensive_weight": 0.05,   # Goleiro quase nunca pontua no ataque
             "defensive_weight": 0.70,   # SG, DE, DP são tudo
             "discipline_weight": 0.25,  # CA/CV destroem goleiro (perde SG também)
         },
-        "Defender": {
+        ZAGUEIRO: {
             # Zagueiro/Lateral: SG (+5.0) é o scout mais valioso.
             # DS (+1.5 cada) é consistente. Gols/Assistências são bônus raros.
             # FC (-0.3) e CA (-1.0) são frequentes e perigosos.
@@ -40,7 +41,7 @@ class ScoringEngine:
             "defensive_weight": 0.55,   # SG + DS são o pão de cada dia
             "discipline_weight": 0.25,  # Zagueiros levam muita falta e cartão
         },
-        "Midfielder": {
+        MEIA: {
             # Meia: posição mais equilibrada. A (+5.0), FS (+0.5 cada, acumula),
             # FD (+1.2 cada). DS (+1.5) também conta.
             # É a posição que mais se beneficia de VOLUME de ações.
@@ -48,7 +49,7 @@ class ScoringEngine:
             "defensive_weight": 0.30,   # DS, SG (se no esquema defensivo)
             "discipline_weight": 0.20,  # Cartões são menos frequentes
         },
-        "Attacker": {
+        ATACANTE: {
             # Atacante: G (+8.0) é TUDO. A (+5.0) complementa.
             # FD (+1.2) e FF (+0.8) mostram volume de finalização.
             # FS (+0.5) acumula bem para atacantes que sofrem muita falta.
@@ -57,6 +58,8 @@ class ScoringEngine:
             "discipline_weight": 0.20,  # PP (-4.0) é devastador
         },
     }
+    # Lateral pontua como zagueiro (SG + DS)
+    POSITION_WEIGHTS[LATERAL] = POSITION_WEIGHTS[ZAGUEIRO]
 
     def __init__(self, db: Session):
         self.db = db
@@ -343,8 +346,8 @@ class ScoringEngine:
         )
 
         # ========== FASE 7: SMART SCORE FINAL ==========
-        position = player.position
-        weights = self.POSITION_WEIGHTS.get(position, self.POSITION_WEIGHTS["Midfielder"])
+        position = normalize_position(player.position)
+        weights = self.POSITION_WEIGHTS.get(position, self.POSITION_WEIGHTS[MEIA])
 
         # Base ponderada por posição
         weighted_score = (
